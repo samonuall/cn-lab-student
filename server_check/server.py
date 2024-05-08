@@ -1,12 +1,89 @@
 import argparse
 import socket
+import re
 import threading
 
 SERVER_ADDRESS = '127.0.0.1'
-SERVER_PORT = 5378
+SERVER_PORT = 5389
 TIMEOUT = .1
-current_users = []
+usernames = {"echobot": None} # {username: socket}
+clients_lock = threading.Lock()
 
+def receiveLogic(client):
+    client_name = ""
+    
+    while True:
+        messages = receive(client)
+        
+        if not messages:
+            # client has closed the connection
+            with clients_lock:
+                del usernames[client_name]
+            return
+        
+        with clients_lock:
+            for message in messages:
+                if 'HELLO-FROM' in message:
+                    name = message[11:]
+                    
+                    if client not in usernames.values(): # socket not logged in yet
+
+                        if len(usernames) == 17: # server is full
+                            send(client, "BUSY\n")
+                        
+                        elif name in usernames:
+                            send(client, "IN-USE\n")
+                            client.close()
+                            return
+                        
+                        elif re.search(r'[^a-zA-Z0-9]', name): #invalid username
+                            send(client, 'BAD-RQST-BODY\n')
+                        
+                        else: #succesful login
+                            usernames[name] = client
+                            client_name = name
+                            send(client, f"HELLO {name}\n")
+
+                    else: # socket is already logged in
+                        send(client, 'BAD-RQST-HDR\n')
+
+                elif not client_name: # user tried to do something without being logged in
+                    send(client, 'BAD-RQST-HDR\n')
+                    client.close()
+                    return
+
+                elif message.startswith('LIST'):
+                    str = 'LIST-OK '
+
+                    for username in usernames.keys():
+                        str +=  f"{username},"
+                    str += '\n'
+                    send(client, str)
+
+                elif message.startswith('SEND'):
+                    index = message.index(" ")
+                    username = message[index+1: message.index(" ", index+1)]
+                    mess = message[message.index(" ", index+1)+1: ]
+                    
+                    if username in usernames:
+                        if username == "echobot":
+                            rec_sock = client
+                            sender_name = "echobot"
+                        else:
+                            rec_sock = usernames[username]
+                            sender_name = client_name
+                        
+                        try:
+                            send(rec_sock, f"DELIVERY {sender_name} {mess}\n")
+                            send_success = True
+                        except:
+                            send_success = False
+                        
+                        if send_success:
+                            send(client, 'SEND-OK\n')
+                    
+                    else:
+                        send(client, 'BAD-DEST-USER\n')
 
 
 def receive(sock):
@@ -16,17 +93,17 @@ def receive(sock):
     Returns: string[], list of responses from client
     '''
     responses = []
-    sock.settimeout(TIMEOUT)
     cut_off_message = ""
     
     while True:
         try:
             data = sock.recv(1024)
-        except socket.timeout:
-            return responses
+        except Exception as e:
+            print("Error:", e)
+            return []
         
         if not data:
-            break
+            return []
         
         data = data.decode("utf-8")
         if cut_off_message:
@@ -35,7 +112,7 @@ def receive(sock):
                 # this whole chunk is the rest of the message
                 responses.append(cut_off_message + data)
                 cut_off_message = ""
-                continue
+                return responses
             
             elif "\n" in data:
                 # end of the message is in this chunk, along with another message
@@ -54,6 +131,7 @@ def receive(sock):
         if data[-1] == "\n":
             # this means no cut off messages
             responses.extend(data.split("\n")[: -1])
+            return responses
         
         elif "\n" in data:
             # this means a message was cut off after a message
@@ -64,7 +142,6 @@ def receive(sock):
         else:
             # no newline characters at all means message is cut off
             cut_off_message = data
-
 
     return responses
 
@@ -87,27 +164,7 @@ def send(sock, string):
         # For example, the sending buffer may be full.
         # send returns the number of bytes that were sent.
         num_bytes_to_send -= sock.send(string_bytes[bytes_len-num_bytes_to_send:])
-
-
-# for deliveries, we need to either just send to other client from the current thread (will have to store client sockets in global var), or
-# let threads communicate with each other and send a command to other thread to send message to the desired user. Problem with first is if two threads send to user at same time maybe.
-# need a way to confirm that message was sent to confirm with sender.
-# always check that the current client is logged in first
-def handle_client(sock, address):
-    logged_in = False
-
-    while True:
-        # blocks until response from client heard
-        responses = []
-        while not responses:
-            try:
-                responses = receive(sock)
-            except:
-                pass
-
-        for response in responses:
             
-
 
 
 def main():
@@ -118,15 +175,18 @@ def main():
     # start listening for incoming connections
     server_socket.listen()
     print("Server is on")
-
+    
     # start server loop
     while True:
-        # Accept incoming connection
-        client_socket, client_address = server_socket.accept()
+        client_socket, _ = server_socket.accept()
+        new_thread = threading.Thread(target=receiveLogic, args=(client_socket,), daemon=True)
+        new_thread.start()
+            
+            
+                    
 
-        # Create a new thread to handle the client connection
-        client_thread = threading.Thread(target=handle_client, args=(client_socket, client_address))
-        client_thread.start()
+        
+
 
 
 
