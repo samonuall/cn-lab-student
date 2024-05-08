@@ -103,6 +103,7 @@ def receive(sock):
             return []
         
         if not data:
+            # means that the socket has been closed by the client
             return []
         
         data = data.decode("utf-8")
